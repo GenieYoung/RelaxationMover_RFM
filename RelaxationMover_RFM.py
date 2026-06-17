@@ -209,6 +209,7 @@ class RelaxationMover_RFM:
             self.solve()
             self.evaluate(i)
  
+            self.CV_residual_record.append(self.residual_CV.cpu().item())
             if torch.norm(self.x_in_new - self.x_in_new_backup) / torch.norm(self.x_in_new_backup) < cfg.rtol:
                 print(f"Converged...")
                 break
@@ -222,7 +223,6 @@ class RelaxationMover_RFM:
                 self.rollback()
                 continue
 
-            self.CV_residual_record.append(self.residual_CV.cpu().item())
             if self.residual_CV < self.best_CV_residual:
                 if self.residual_CV > self.best_CV_residual * 0.8:
                     self.pseudo_dt *= 1.1
