@@ -48,15 +48,15 @@ class RFBase(ABC):
             self.gen.manual_seed(100)
 
         
-        if n_hidden < 500:
+        if n_hidden <= 500:
             gamma = 1.5
-        elif n_hidden < 1000:
+        elif n_hidden <= 1000:
             gamma = 2
-        elif n_hidden < 1500:
+        elif n_hidden <= 1500:
             gamma = 2.5
-        elif n_hidden < 2000:
+        elif n_hidden <= 2000:
             gamma = 2.6
-        elif n_hidden < 4000:
+        elif n_hidden <= 4000:
             gamma = 2.8
         else:
             gamma = 3.4
