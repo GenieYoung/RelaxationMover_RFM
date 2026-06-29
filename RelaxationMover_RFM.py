@@ -3,24 +3,6 @@ import torch
 import time
 from dataclasses import dataclass
 
-@dataclass
-class RFMConfig:
-    predefine_inner : torch.Tensor = None # predefined inner points
-    n_samples_inner : int = 16000     # internal
-    n_samples_boundary : int = 2000     # boundary
-    n_samples_interface : int = 1000     # interface
-    corner1 : torch.Tensor = None # corner points with dirichlet condition
-    corner2 : torch.Tensor = None # corner points with zero gradient
-    inner_lambda : float = 1.0 # weight for inner residual
-    boundary_lambda : float = 1.0 # weight for boundary residual
-    interface_lambda : float = 1.0 # weight for interface residual (only for PsiA)
-    corner_lambda : float = 1.0 # weight for corner residual
-    n_hidden : int = 1500       # hidden dimension
-    n_subdomains : int = 1  # subdivisions per dimension
-    pou : str = 'PsiA'  # partition of unity type, PsiA or PsiB
-    rf : str = 'tanh3' # random feature class, tanh / tanh3
-    damp_value : float = None # damping value
-
 pou_list = {
     'PsiA': pyrfm.PsiA,
     'PsiB': pyrfm.PsiB,
@@ -32,10 +14,28 @@ rf_list = {
 }
 
 @dataclass
+class RFMConfig:
+    n_samples_inner : int = 10000     # internal
+    n_samples_boundary : int = 1000     # boundary
+    n_samples_interface : int = 1000     # interface
+    corner1 : torch.Tensor = None # corner points with dirichlet condition
+    corner2 : torch.Tensor = None # corner points with zero gradient
+    inner_lambda : float = 1.0 # weight for inner residual
+    boundary_lambda : float = 1.0 # weight for boundary residual
+    interface_lambda : float = 1.0 # weight for interface residual (only for PsiA)
+    corner_lambda : float = 1.0 # weight for corner residual
+    n_hidden : int = 1000       # hidden dimension
+    n_subdomains : int = 1  # subdivisions per dimension
+    gamma : float = 2.0 # random feature gamma parameter
+    pou : str = 'PsiA'  # partition of unity type, PsiA or PsiB
+    rf : str = 'tanh3' # random feature class, tanh / tanh3
+    damp_value : float = None # damping value
+
+@dataclass
 class IterationConfig:
-    maxiter : int = 10000
+    maxiter : int = 200
     rtol : float = 1e-5
-    pseudo_dt : float = 0.01
+    pseudo_dt : float = 0.1
     early_stop_num : int = 10
     verbose : bool = True
 
@@ -43,24 +43,31 @@ class RelaxationMover_RFM:
     def __init__(self, domain: pyrfm.GeometryBase, cfg: RFMConfig):
         self.domain = domain
 
-        start = time.perf_counter()
         self.build_model(cfg)
+        self.adjust_model(cfg)
+
+        start = time.perf_counter()
         self.build_features(cfg)
         self.preprocess(cfg)
         self.build_time = time.perf_counter() - start
 
     def build_model(self, cfg: RFMConfig):
-        self.pou = pou_list[cfg.pou]
-        self.rf = rf_list[cfg.rf]
         self.n_hiddens = cfg.n_hidden * cfg.n_subdomains * cfg.n_subdomains
-        self.model = pyrfm.RFMBase(dim=2, n_hidden=cfg.n_hidden, domain=self.domain, n_subdomains=cfg.n_subdomains, pou=self.pou, rf=self.rf)
+        self.model = pyrfm.RFMBase(dim=2, n_hidden=cfg.n_hidden, domain=self.domain, n_subdomains=cfg.n_subdomains, pou=pou_list[cfg.pou], rf=rf_list[cfg.rf])
         self.model.W = torch.zeros((self.n_hiddens, 1))
 
+    def adjust_model(self, cfg: RFMConfig):
+        # To TransNet
+        for submodel in self.model.submodels.flat_data:
+            submodel.weights = torch.randn((submodel.dim, submodel.n_hidden), generator=submodel.gen, dtype=submodel.dtype, device=submodel.device)
+            submodel.weights = submodel.weights / torch.norm(submodel.weights, dim=0, keepdim=True)
+            submodel.weights = submodel.weights * cfg.gamma
+
+            submodel.biases = torch.rand((1, submodel.n_hidden), generator=submodel.gen, dtype=submodel.dtype, device=submodel.device)
+            submodel.biases = submodel.biases * cfg.gamma
+
     def build_features(self, cfg: RFMConfig):
-        if cfg.predefine_inner is not None:
-            self.x_in = cfg.predefine_inner
-        else:
-            self.x_in = self.domain.in_sample(cfg.n_samples_inner, with_boundary=False)
+        self.x_in = self.domain.in_sample(cfg.n_samples_inner, with_boundary=False)
         self.A_in_x = self.model.features_derivative(self.x_in, axis=0).cat(dim=1)
         self.A_in_y = self.model.features_derivative(self.x_in, axis=1).cat(dim=1)
         self.A_in_xx = self.model.features_second_derivative(self.x_in, axis1=0, axis2=0).cat(dim=1)
@@ -132,11 +139,10 @@ class RelaxationMover_RFM:
         self.x_in_new = self.x_in + torch.cat([phi_in_x, phi_in_y], dim=1)
             
         # evaluate monitor function on new mesh
-        self.monitor = self.monitor_func(self.x_in_new[:, [0]], self.x_in_new[:, [1]])
-
-        self.theta_val = (self.monitor * ((1 + self.phi_in_xx) * (1 + self.phi_in_yy) - self.phi_in_xy**2))
+        self.monitor = self.monitor_func(self.x_in_new).reshape(-1, 1)
 
         # evaluate theta and residual
+        self.theta_val = (self.monitor * ((1 + self.phi_in_xx) * (1 + self.phi_in_yy) - self.phi_in_xy**2))
         self.theta_mean = self.theta_val.mean()
         self.residual_CV = torch.std(self.theta_val, unbiased=False) / torch.abs(self.theta_mean).clamp_min(1e-12)
 
@@ -147,20 +153,13 @@ class RelaxationMover_RFM:
                 f"pseudo_dt = {self.pseudo_dt:.10f}")
 
     def backup(self):
+        self.W_backup = self.model.W.clone()
         self.x_in_new_backup = self.x_in_new.clone()
-        self.theta_val_backup = self.theta_val.clone()
-        self.theta_mean_backup = self.theta_mean.clone()
-        self.phi_in_xx_backup = self.phi_in_xx.clone()
-        self.phi_in_yy_backup = self.phi_in_yy.clone()
         self.min_eigenvalue_backup = self.min_eigenvalue.clone()
 
-    def rollback(self):
-        self.x_in_new = self.x_in_new_backup.clone()
-        self.theta_val = self.theta_val_backup.clone()
-        self.theta_mean = self.theta_mean_backup.clone()
-        self.phi_in_xx = self.phi_in_xx_backup.clone()
-        self.phi_in_yy = self.phi_in_yy_backup.clone()
-        self.min_eigenvalue = self.min_eigenvalue_backup.clone()
+    def rollback(self, iter):
+        self.model.W = self.W_backup.clone()
+        self.evaluate(iter)
 
     def solve(self):
         # evaluate phi^{k+1}
@@ -183,44 +182,40 @@ class RelaxationMover_RFM:
         self.model.solve(B, verbose=False)
             
     def relaxation(self, monitor_func, cfg: IterationConfig):
-        self.model.W = torch.zeros((self.n_hiddens, 1))
         self.monitor_func = monitor_func
-        self.monitor_func_backup = monitor_func
-
         self.pseudo_dt = cfg.pseudo_dt
         self.verbose = cfg.verbose
-        
-        # residual record
-        self.CV_residual_record = []
-        self.ratio_record = []
-
-        # iteration parameters
-        early_stop_count = 0
-        self.residual_CV = torch.tensor(1e10)
+        self.model.W = torch.zeros((self.n_hiddens, 1))
         best_W = self.model.W.clone()
 
         start = time.perf_counter()
 
-        self.evaluate(0)      
+        self.CV_residual_record = []
+        self.evaluate(0)
+        self.CV_residual_record.append(self.residual_CV.cpu().item())      
         self.best_CV_residual = self.residual_CV
-        self.CV_residual_record.append(self.residual_CV.cpu().item())
+        early_stop_count = 0
         for i in range(1, cfg.maxiter):
             self.backup()
             self.solve()
             self.evaluate(i)
  
             self.CV_residual_record.append(self.residual_CV.cpu().item())
+
             if torch.norm(self.x_in_new - self.x_in_new_backup) / torch.norm(self.x_in_new_backup) < cfg.rtol:
                 print(f"Converged...")
                 break
+
+            #bad_step = (self.min_eigenvalue < 0.1 * self.min_eigenvalue_backup or self.min_eigenvalue < 1e-5)
+            bad_step = (self.min_eigenvalue < 0.5 * self.min_eigenvalue_backup or self.min_eigenvalue < 1e-5 or \
+                self.residual_CV > self.best_CV_residual * 1.5)
                         
-            if self.min_eigenvalue < 0.5 * self.min_eigenvalue_backup or self.min_eigenvalue < 0.01 or \
-                self.residual_CV > self.best_CV_residual * 1.5:
+            if bad_step:
                 self.pseudo_dt *= 0.5
                 if self.pseudo_dt < 1e-5:
                     print(f"Early stop at iteration {i}, CV residual: {self.best_CV_residual:.8e}")
                     break
-                self.rollback()
+                self.rollback(i)
                 continue
 
             if self.residual_CV < self.best_CV_residual:

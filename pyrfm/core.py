@@ -28,9 +28,7 @@ class RFBase(ABC):
                  activation: nn.Module, n_hidden: int,
                  gen: torch.Generator = None,
                  dtype: torch.dtype = None,
-                 device: torch.device = None,
-                 weights = None,
-                 biases = None):
+                 device: torch.device = None):
         self.dtype = dtype if dtype is not None else torch.tensor(0.).dtype
         self.device = device if device is not None else torch.tensor(0.).device
 
@@ -47,34 +45,10 @@ class RFBase(ABC):
             self.gen = torch.Generator(device=self.device)
             self.gen.manual_seed(100)
 
-        
-        if n_hidden <= 500:
-            gamma = 1.5
-        elif n_hidden <= 1000:
-            gamma = 2
-        elif n_hidden <= 1500:
-            gamma = 2.5
-        elif n_hidden <= 2000:
-            gamma = 2.6
-        elif n_hidden <= 4000:
-            gamma = 2.8
-        else:
-            gamma = 3.4
-        if weights is None:
-            # self.weights: torch.Tensor = torch.rand((self.dim, self.n_hidden), generator=self.gen, dtype=self.dtype,
-            #                                         device=self.device) * 2 - 1
-            self.weights: torch.Tensor = torch.randn((self.dim, self.n_hidden), generator=self.gen, dtype=self.dtype, device=self.device)
-            self.weights = self.weights / torch.norm(self.weights, dim=0, keepdim=True)
-            self.weights = self.weights * gamma
-        else:
-            self.weights = weights
-        if biases is None:
-            # self.biases: torch.Tensor = torch.rand((1, self.n_hidden), generator=self.gen, dtype=self.dtype,
-            #                                     device=self.device) * 2 - 1
-            self.biases: torch.Tensor = torch.rand((1, self.n_hidden), generator=self.gen, dtype=self.dtype, device=self.device)
-            self.biases = self.biases * gamma
-        else:
-            self.biases = biases
+        self.weights: torch.Tensor = torch.rand((self.dim, self.n_hidden), generator=self.gen, dtype=self.dtype,
+                                                device=self.device) * 2 - 1
+        self.biases: torch.Tensor = torch.rand((1, self.n_hidden), generator=self.gen, dtype=self.dtype,
+                                               device=self.device) * 2 - 1
 
         self.x_buff_: torch.Tensor or None = None
         self.features_buff_: torch.Tensor or None = None
@@ -113,10 +87,8 @@ class RFTanH(RFBase):
                  gen: torch.Generator = None,
                  dtype: torch.dtype = None,
                  device: torch.device = None,
-                 use_cache: bool = True,
-                 weights = None,
-                 biases = None):
-        super().__init__(dim, center, radius, nn.Tanh(), n_hidden, gen, dtype, device, weights, biases)
+                 use_cache: bool = True):
+        super().__init__(dim, center, radius, nn.Tanh(), n_hidden, gen, dtype, device)
         self.use_cache = use_cache
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -334,10 +306,8 @@ class RFTanH3(RFBase):
                  gen: torch.Generator = None,
                  dtype: torch.dtype = None,
                  device: torch.device = None,
-                 use_cache: bool = True,
-                 weights = None,
-                 biases = None):
-        super().__init__(dim, center, radius, nn.Tanh(), n_hidden, gen, dtype, device, weights, biases)
+                 use_cache: bool = True):
+        super().__init__(dim, center, radius, nn.Tanh(), n_hidden, gen, dtype, device)
         self.use_cache = use_cache
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
