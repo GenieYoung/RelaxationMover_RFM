@@ -203,6 +203,7 @@ class RelaxationMover_RFM:
             self.CV_residual_record.append(self.residual_CV.cpu().item())
 
             if torch.norm(self.x_in_new - self.x_in_new_backup) / torch.norm(self.x_in_new_backup) < cfg.rtol:
+                best_W = self.model.W.clone()
                 print(f"Converged...")
                 break
 
