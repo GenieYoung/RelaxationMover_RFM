@@ -1477,6 +1477,7 @@ class RFMBase(ABC):
 
         :param A: Input matrix.
         :param damp: Damping factor for regularization.
+        :param penalty: Positive weights multiplying the row-normalized squared residuals.
         :param use_complex: Whether to use complex numbers.
         :return: Self.
         """
@@ -1484,10 +1485,12 @@ class RFMBase(ABC):
             self.dtype = torch.complex128 if self.dtype == torch.float64 else torch.complex64
         A = A.to(dtype=self.dtype, device=self.device)
         self.A_norm = torch.linalg.norm(A, ord=2, dim=1, keepdim=True)
+        self.A_norm = torch.where(self.A_norm > 0, self.A_norm, torch.ones_like(self.A_norm))
         if penalty is not None:
+            penalty = penalty.to(dtype=self.A_norm.dtype, device=self.device).reshape(-1, 1)
             self.A_norm /= torch.sqrt(penalty)
         # self.A_norm = torch.ones((A.shape[0], 1))
-        A /= self.A_norm
+        A = A / self.A_norm
         self.A_backup = A.clone().cpu()
         if abs(damp) > 0.0:
             A = torch.cat(
@@ -1523,8 +1526,8 @@ class RFMBase(ABC):
             else:
                 raise ValueError("Input dimension mismatch.")
         b /= self.A_norm
-        b_backup = b.clone().cpu()
-        b = torch.cat([b, torch.zeros((self.A.shape[0] - b.shape[0], 1), dtype=self.dtype, device=self.device)],
+        # b_backup = b.clone().cpu()
+        b = torch.cat([b, torch.zeros((self.A.shape[0] - b.shape[0], b.shape[1]), dtype=self.dtype, device=self.device)],
                       dim=0) if with_damping else b
 
         # detect whether A is from a damped system
@@ -1538,8 +1541,9 @@ class RFMBase(ABC):
             #     diag_to_compare = diag
             # diag.add_((diag_to_compare >= 0).float() * torch.finfo(self.dtype).eps)
             self.W = torch.linalg.solve_triangular(self.A[:self.A.shape[1], :], y, upper=True)
-            b_ = torch.ormqr(self.A, self.tau, torch.matmul(torch.triu(self.A), self.W), transpose=False)
-            residual = torch.norm(b_ - b) / torch.norm(b)
+            if verbose:
+                b_ = torch.ormqr(self.A, self.tau, torch.matmul(torch.triu(self.A), self.W), transpose=False)
+                residual = torch.norm(b_ - b) / torch.norm(b).clamp_min(torch.finfo(b.real.dtype).eps)
 
             # w_set = []
             # b_ = b.clone()
@@ -1563,21 +1567,22 @@ class RFMBase(ABC):
                     torch.matmul(self.A_backup.to(dtype=self.dtype, device=self.device), self.W) - b) / torch.norm(b)
 
         except RuntimeError as e:
-            # Add support for minium norm solution
-            logger.warning(str(e))
-            logger.warning("Switching to torch.linalg.lstsq solver.")
-            self.A = self.A_backup.to(dtype=self.dtype, device=self.device)
-            b = b_backup.to(dtype=self.dtype, device=self.device)
-            self.W = torch.linalg.lstsq(self.A, b,
-                                        driver='gels').solution
-            residual = torch.norm(torch.matmul(self.A, self.W) - b) / torch.norm(b)
+            raise RuntimeError(f"Failed to solve the linear system: {str(e)}")
+            # # Add support for minium norm solution
+            # logger.warning(str(e))
+            # logger.warning("Switching to torch.linalg.lstsq solver.")
+            # self.A = self.A_backup.to(dtype=self.dtype, device=self.device)
+            # b = b_backup.to(dtype=self.dtype, device=self.device)
+            # self.W = torch.linalg.lstsq(self.A, b,
+            #                             driver='gels').solution
+            # residual = torch.norm(torch.matmul(self.A, self.W) - b) / torch.norm(b)
 
         if verbose:
             print(f"Least Square Relative residual: {residual:.4e}")
 
         if self.W.numel() % (self.submodels.numel() * self.n_hidden) == 0:
             n_out = int(self.W.numel() / (self.submodels.numel() * self.n_hidden))
-            self.W = self.W.view(n_out, -1).T
+            self.W = self.W.reshape(-1, n_out)
         else:
             warnings.warn("The output weight size is not a multiple of the expected size. Keeping W as a flat tensor.")
             return self.W
